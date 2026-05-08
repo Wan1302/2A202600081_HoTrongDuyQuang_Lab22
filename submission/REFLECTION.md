@@ -117,6 +117,8 @@ Với limit=1, các con số này không nói lên điều gì về chất lư�
 
 Điều duy nhất có thể rút ra: AlpacaEval-lite=0.5 cho cả hai (tie với gpt-4o-mini judge) nhất quán với kết quả NB4 nơi 5/8 prompt cũng là tie. Điều này gợi ý rằng với dataset nhỏ 2k cặp và model 3B, DPO cải thiện được helpfulness (win 2/4) nhưng chưa đủ lớn để tạo ra sự khác biệt rõ ràng ở benchmark tổng quát.
 
+Theo **deck §8.1 (alignment tax)**, DPO thường gây regression trên các benchmark đo năng lực tổng quát như GSM8K (toán) và MMLU (kiến thức rộng), trong khi cải thiện IFEval (instruction-following) và win-rate trên AlpacaEval. Với kết quả limit=1 không có ý nghĩa thống kê, không thể xác nhận hay bác bỏ alignment tax trong lab này. Tuy nhiên nếu chạy đủ samples, kỳ vọng là: GSM8K có thể giảm nhẹ (alignment tax), IFEval tăng (DPO giúp follow format tốt hơn), MMLU flat (factual knowledge preserved), AlpacaEval tăng (helpfulness alignment).
+
 Để có benchmark có ý nghĩa, cần: (1) chạy NB6 sớm hơn khi GPU còn trống, (2) dùng limit tối thiểu 100+ samples, hoặc (3) restart session riêng chỉ để chạy NB6.
 
 ---
