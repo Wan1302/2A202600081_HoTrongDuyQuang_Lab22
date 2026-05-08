@@ -31,12 +31,14 @@ if COMPUTE_TIER == "T4":
     MAX_PROMPT_LEN = 256
     PER_DEVICE_BATCH = 1
     GRAD_ACCUM = 8
+    MODEL_LOAD_KWARGS = {"attn_implementation": "eager"}
 else:
     BASE_MODEL = "unsloth/Qwen2.5-7B-bnb-4bit"
     MAX_LEN = 1024
     MAX_PROMPT_LEN = 512
     PER_DEVICE_BATCH = 1
     GRAD_ACCUM = 4
+    MODEL_LOAD_KWARGS = {}
 
 # Hyperparameters from deck §5.2 lines 849–886
 BETA = float(os.environ.get("DPO_BETA", "0.1"))
@@ -65,6 +67,14 @@ print(f"output:          {DPO_OUT}")
 import torch
 
 assert torch.cuda.is_available(), "DPO needs a CUDA GPU. See HARDWARE-GUIDE.md."
+gpu_major, gpu_minor = torch.cuda.get_device_capability()
+if COMPUTE_TIER == "T4" or gpu_major < 8:
+    os.environ.setdefault("UNSLOTH_COMPILE_DISABLE", "1")
+    os.environ.setdefault("UNSLOTH_ENABLE_FLEX_ATTENTION", "0")
+    print(
+        "Set UNSLOTH_COMPILE_DISABLE=1 for T4/SM<80 "
+        "to avoid xFormers GQA backward kernels."
+    )
 
 # %% [markdown]
 # ### 0a. Optional bonus: W&B login (rigor add-on +2)
@@ -106,12 +116,20 @@ else:
 from unsloth import FastLanguageModel
 from peft import PeftModel
 
-# Policy — gets new DPO LoRA adapter on top of SFT LoRA
+if COMPUTE_TIER == "T4" or gpu_major < 8:
+    import unsloth.utils.attention_dispatch as _attention_dispatch
+    _attention_dispatch.HAS_XFORMERS = False
+    _attention_dispatch.xformers_attention = None
+    _attention_dispatch.XFORMERS_BLOCK_DIAG_CLS = None
+    print("Disabled Unsloth xFormers attention backend for T4/SM<80")
+
+# Policy - gets new DPO LoRA adapter on top of SFT LoRA
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
     max_seq_length=MAX_LEN,
     dtype=None,
     load_in_4bit=True,
+    **MODEL_LOAD_KWARGS,
 )
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -166,6 +184,7 @@ dpo_config = DPOConfig(
     logging_steps=10,
     save_strategy="no",
     optim="adamw_8bit",
+    padding_free=False,
     bf16=torch.cuda.is_bf16_supported(),
     fp16=not torch.cuda.is_bf16_supported(),
     seed=42,
@@ -372,7 +391,7 @@ Day 22 alignment lab. Stack: Unsloth + TRL `DPOTrainer`.
 |---|---|
 | Base model | `{BASE_MODEL}` |
 | Compute tier | {COMPUTE_TIER} |
-| SFT predecessor | 1k VN Alpaca (`5CD-AI/Vietnamese-alpaca-cleaned`) |
+| SFT predecessor | 1k VN Alpaca (`bkai-foundation-models/vi-alpaca`) |
 | Preference dataset | `argilla/ultrafeedback-binarized-preferences-cleaned` (2k slice) |
 | DPO β | {BETA} |
 | DPO learning rate | {LR} |

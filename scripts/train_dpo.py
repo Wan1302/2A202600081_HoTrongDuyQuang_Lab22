@@ -34,10 +34,12 @@ def main():
         base_model = "unsloth/Qwen2.5-3B-bnb-4bit"
         max_len, max_prompt = 512, 256
         batch, grad_accum = 1, 8
+        model_load_kwargs = {"attn_implementation": "eager"}
     else:
         base_model = "unsloth/Qwen2.5-7B-bnb-4bit"
         max_len, max_prompt = 1024, 512
         batch, grad_accum = 1, 4
+        model_load_kwargs = {}
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -48,13 +50,35 @@ def main():
     print(f"Output:     {output}")
 
     import torch
+
+    if torch.cuda.is_available():
+        gpu_major, gpu_minor = torch.cuda.get_device_capability()
+        if tier == "T4" or gpu_major < 8:
+            os.environ.setdefault("UNSLOTH_COMPILE_DISABLE", "1")
+            os.environ.setdefault("UNSLOTH_ENABLE_FLEX_ATTENTION", "0")
+            print(
+                "Set UNSLOTH_COMPILE_DISABLE=1 for T4/SM<80 "
+                "to avoid xFormers GQA backward kernels."
+            )
+
     from datasets import Dataset
     from peft import PeftModel
     from trl import DPOConfig, DPOTrainer
     from unsloth import FastLanguageModel
 
+    if torch.cuda.is_available() and (tier == "T4" or gpu_major < 8):
+        import unsloth.utils.attention_dispatch as _attention_dispatch
+        _attention_dispatch.HAS_XFORMERS = False
+        _attention_dispatch.xformers_attention = None
+        _attention_dispatch.XFORMERS_BLOCK_DIAG_CLS = None
+        print("Disabled Unsloth xFormers attention backend for T4/SM<80")
+
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=base_model, max_seq_length=max_len, dtype=None, load_in_4bit=True,
+        model_name=base_model,
+        max_seq_length=max_len,
+        dtype=None,
+        load_in_4bit=True,
+        **model_load_kwargs,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -82,6 +106,7 @@ def main():
         logging_steps=10,
         save_strategy="no",
         optim="adamw_8bit",
+        padding_free=False,
         bf16=torch.cuda.is_bf16_supported(),
         fp16=not torch.cuda.is_bf16_supported(),
         seed=42,

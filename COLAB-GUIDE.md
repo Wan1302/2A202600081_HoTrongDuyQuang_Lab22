@@ -12,24 +12,26 @@ Hướng dẫn cụ thể từng bước chạy `colab/Lab22_DPO_T4.ipynb` trên
    gh repo create Day22-Track3-DPO-Alignment-Lab --public --source=. --push
    ```
    Hoặc trên web: GitHub → New repo → public → upload từ local.
-2. Repo URL: `https://github.com/<your-username>/Day22-Track3-DPO-Alignment-Lab`
+2. Repo URL: `https://github.com/Wan1302/2A202600081_HoTrongDuyQuang_Lab22`
 3. Mở `README.md` line 27 — sửa `<your-username>` thành GitHub username thật để badge hoạt động.
 
 ### 1.2 HuggingFace token (Submission Option B = +5)
 1. https://huggingface.co/settings/tokens → "New token" → **role = Write** → tên `lab22`.
 2. Copy token (`hf_...`).
-3. Tạo repo target trước (optional — code tự `create_repo` nếu chưa có):
-   - Adapter: `https://huggingface.co/new` → name `lab22-dpo-vn-adapter` → **public**
-   - GGUF: tương tự, name `lab22-dpo-vn-gguf` → **public**
+3. **Không cần tạo repo thủ công** — code dùng `create_repo(exist_ok=True)` để tự tạo 2 repo public khi push:
+   - `<hf-username>/lab22-dpo-vn-adapter` (do NB3 tạo + push)
+   - `<hf-username>/lab22-dpo-vn-gguf` (do NB5 tạo + push)
+   Bạn chỉ cần biết `<hf-username>` của mình để điền vào secret `HF_REPO` ở §2.3.
 
 ### 1.3 Weights & Biases (+2 bonus)
 1. https://wandb.ai/authorize → copy API key (40 ký tự).
 2. (Optional) Tạo project name: `lab22-dpo` (mặc định trong code).
 
-### 1.4 Judge API keys (+4 cross-judge bonus)
-- **OpenAI:** https://platform.openai.com/api-keys (cần $5 credit, ~$0.02 cho 100 prompts × 2 judges)
-- **Anthropic:** https://console.anthropic.com/settings/keys (cần $5 credit)
-- Cả hai đều cho new account dùng free credit. Lab cần khoảng $0.10 tổng cộng.
+### 1.4 Judge API key — chỉ OpenAI
+
+- **OpenAI:** https://platform.openai.com/api-keys (cần ~$5 credit; lab dùng ~$0.05 tổng cho NB4 + NB6 AlpacaEval-lite).
+- Setup này chạy NB4/NB6 ở **single-judge mode** (gpt-4o-mini). Đủ cho core 100/100.
+- Bonus cross-judge (+4) cần thêm Anthropic key — bỏ qua add-on này, target tổng là **core 100 + bonus 16 = 116**.
 
 ---
 
@@ -52,8 +54,7 @@ Hướng dẫn cụ thể từng bước chạy `colab/Lab22_DPO_T4.ipynb` trên
 | `HF_TOKEN` | `hf_...` (từ bước 1.2) | +5 (Option B) |
 | `HF_REPO` | `<your-hf-username>/lab22-dpo-vn` | (cùng +5) |
 | `WANDB_API_KEY` | API key từ 1.3 | +2 |
-| `OPENAI_API_KEY` | `sk-...` từ 1.4 | +4 (cross-judge) |
-| `ANTHROPIC_API_KEY` | `sk-ant-...` từ 1.4 | (cùng +4) |
+| `OPENAI_API_KEY` | `sk-...` từ 1.4 | (judge cho NB4/NB6 — bắt buộc cho judge mode) |
 
 > Lab tự derive `HF_REPO_ADAPTER = HF_REPO + "-adapter"` và `HF_REPO_GGUF = HF_REPO + "-gguf"`. Hoặc bạn set trực tiếp 2 biến đó nếu muốn tên khác.
 
@@ -99,14 +100,13 @@ NB3b β-sweep gọi `scripts/train_dpo.py` — cần file đó tồn tại trong
 - Output: `adapters/dpo-b0.05/`, `adapters/dpo-b0.5/`, `submission/screenshots/bonus-beta-sweep.png`.
 - Skip nếu hết thời gian — **mất +6 nhưng không ảnh hưởng core**.
 
-### 3.6 Stage 4 — NB4 Compare + cross-judge (~5 phút)
+### 3.6 Stage 4 — NB4 Compare + judge (~5 phút)
 - Generate cho 8 prompts × 2 model = 16 outputs.
-- Cross-judge tự chạy nếu có cả `OPENAI_API_KEY` + `ANTHROPIC_API_KEY`.
-- Output: `04-side-by-side-table.png`, `judge_results.json`, `judge_cross.json` (nếu cross), `08-cross-judge-matrix.png` (nếu cross).
+- Single-judge mode (gpt-4o-mini). Cross-judge cell tự skip vì chỉ có OpenAI key.
+- Output: `04-side-by-side-table.png`, `judge_results.json`.
 - **Screenshot bắt buộc:**
   - `04-side-by-side-table.png` (tự lưu)
   - `05-judge-output.png` — chụp output cell judge in ra (3+ verdicts có lý do)
-- **Screenshot bonus:** `08-cross-judge-matrix.png` (tự lưu nếu cross-judge chạy).
 
 ### 3.7 Stage 5 — NB5 Merge + GGUF + HF push (~5–10 phút)
 - Merge SFT + DPO LoRA → FP16 → quantize Q4_K_M + Q5_K_M + Q8_0.
@@ -116,8 +116,8 @@ NB3b β-sweep gọi `scripts/train_dpo.py` — cần file đó tồn tại trong
 
 ### 3.8 Stage 6 — NB6 Benchmark (~30 phút)
 - IFEval (~5 min) + GSM8K (~10 min) + MMLU sampled (~10 min) + AlpacaEval-lite (~5 min).
-- Cross-judge AlpacaEval-lite tự chạy nếu có cả 2 keys.
-- Output: `data/eval/benchmark_results.json`, `07-benchmark-comparison.png`.
+- AlpacaEval-lite chạy single-judge (gpt-4o-mini) vì chỉ có OpenAI key.
+- Output: `data/eval/benchmark_results.json`, `07-benchmark-comparison.png`, `alpaca_lite_judgments_openai.json`.
 - **Screenshot bắt buộc:** `07-benchmark-comparison.png` (tự lưu).
 
 ### 3.9 Verify + zip
@@ -144,22 +144,24 @@ Trong `lab22_results.zip` cần có (verify đã đảm bảo, nhưng bạn chec
 - `submission/screenshots/06-gguf-smoke.png`
 - `submission/screenshots/07-benchmark-comparison.png`
 
-**Bonus (mỗi cái cộng tương ứng):**
+**Bonus đang lấy (tổng +16):**
 - W&B run URL (`+2`) — copy từ output cell W&B init
 - HF model link `<user>/lab22-dpo-vn-adapter` (`+5` Option B)
 - HF GGUF link `<user>/lab22-dpo-vn-gguf` với 3 quants (`+3`)
 - `submission/screenshots/bonus-beta-sweep.png` + `data/eval/beta_sweep.json` (`+6`)
-- `data/eval/judge_cross.json` + `08-cross-judge-matrix.png` + `alpaca_lite_cross_judge.json` (`+4`)
+
+**Bonus đã bỏ (không có Anthropic key):**
+- Cross-judge gpt-4o-mini × claude-haiku (`+4`) — skip
 
 **Screenshots tôi cần thêm (chụp tay):**
 - `01-setup-gpu.png` — output cell `nvidia-smi` hoặc GPU probe
 - `05-judge-output.png` — output cell judge in ra 3+ verdicts có justification
 
 Bạn upload `lab22_results.zip` (hoặc tar.gz) cho tôi → tôi sẽ:
-1. Đọc `dpo_metrics.json`, `benchmark_results.json`, `judge_cross.json`, `beta_sweep.json`
+1. Đọc `dpo_metrics.json`, `benchmark_results.json`, `beta_sweep.json`, `judge_results.json`
 2. Đọc số liệu thực + cross-reference deck §3.4 / §8.1
 3. Viết `submission/REFLECTION.md` đầy đủ 7 sections (gồm § 5 β-sweep + § 7 alignment-tax)
-4. Tick checkboxes Bonus tương ứng
+4. Tick checkboxes Bonus đã đạt (4/5 add-on, tổng +16)
 
 ---
 
@@ -171,7 +173,7 @@ Bạn upload `lab22_results.zip` (hoặc tar.gz) cho tôi → tôi sẽ:
 | `huggingface_hub.errors.HfHubHTTPError: 401` | `HF_TOKEN` không phải Write permission. Tạo lại token với role=Write. |
 | `OutOfMemoryError` ở DPO step 1 | Restart runtime. Verify `COMPUTE_TIER=T4`. Kiểm tra GPU = T4 (16 GB), không phải CPU. |
 | β-sweep cell không tìm thấy `train_dpo.py` | Xem 2.4 — clone repo hoặc upload manual. |
-| Cross-judge skipped | Set CẢ HAI `OPENAI_API_KEY` và `ANTHROPIC_API_KEY`. Chỉ 1 key → fallback single judge. |
+| `OPENAI_API_KEY` không nhận | Toggle "Notebook access" trong Secrets panel. Verify ở Stage A có `✓ OPENAI_API_KEY loaded into env`. |
 | Colab disconnect giữa chừng | Free T4 cap ~12h/session. Chia làm 2 session: NB1-3 (1h) + NB3b-6 (2h). State persist via `/content/lab22/`. |
 | GGUF push fail "file too large" | Chỉnh `MULTI_QUANT=0` trong Stage A — chỉ push Q4_K_M. Mất +3 nhưng giữ +5. |
 | `lm_eval` IFEval crashes | Set env `HF_DATASETS_TRUST_REMOTE_CODE=1` ở đầu Stage 6 và rerun. |

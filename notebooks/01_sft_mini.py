@@ -35,13 +35,15 @@ if COMPUTE_TIER == "T4":
     MAX_LEN = 512
     PER_DEVICE_BATCH = 1
     GRAD_ACCUM = 8
+    MODEL_LOAD_KWARGS = {"attn_implementation": "eager"}
 else:  # BIGGPU
     BASE_MODEL = "unsloth/Qwen2.5-7B-bnb-4bit"
     MAX_LEN = 1024
     PER_DEVICE_BATCH = 2
     GRAD_ACCUM = 4
+    MODEL_LOAD_KWARGS = {}
 
-SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-cleaned")
+SFT_DATASET = os.environ.get("SFT_DATASET", "bkai-foundation-models/vi-alpaca")
 SFT_SLICE = 1000
 NUM_EPOCHS = 1
 
@@ -62,6 +64,14 @@ import torch
 assert torch.cuda.is_available(), "DPO needs a CUDA GPU. See HARDWARE-GUIDE.md."
 gpu = torch.cuda.get_device_properties(0)
 print(f"GPU: {gpu.name}  ({gpu.total_memory / 1e9:.1f} GB)")
+gpu_major, gpu_minor = torch.cuda.get_device_capability()
+if COMPUTE_TIER == "T4" or gpu_major < 8:
+    os.environ.setdefault("UNSLOTH_COMPILE_DISABLE", "1")
+    os.environ.setdefault("UNSLOTH_ENABLE_FLEX_ATTENTION", "0")
+    print(
+        "Set UNSLOTH_COMPILE_DISABLE=1 for T4/SM<80 "
+        "to avoid xFormers GQA backward kernels."
+    )
 
 # %% [markdown]
 # ### 0a. Optional bonus: W&B login (rigor add-on +2)
@@ -108,17 +118,39 @@ else:
 # %%
 from unsloth import FastLanguageModel
 
+if COMPUTE_TIER == "T4" or gpu_major < 8:
+    import unsloth.utils.attention_dispatch as _attention_dispatch
+    _attention_dispatch.HAS_XFORMERS = False
+    _attention_dispatch.xformers_attention = None
+    _attention_dispatch.XFORMERS_BLOCK_DIAG_CLS = None
+    print("Disabled Unsloth xFormers attention backend for T4/SM<80")
+
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=BASE_MODEL,
     max_seq_length=MAX_LEN,
     dtype=None,                # auto: bf16 on Ampere+, fp16 on Turing
     load_in_4bit=True,
+    **MODEL_LOAD_KWARGS,
 )
 
 # Critical for batch training — Qwen tokenizers ship without pad token.
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
     print("Set tokenizer.pad_token = eos_token")
+
+# Unsloth's bnb-4bit Qwen tokenizer ships without chat_template — restore it
+# so apply_chat_template() works downstream (NB2/3/4/5/6 inherit via
+# tokenizer.save_pretrained → AutoTokenizer.from_pretrained).
+if tokenizer.chat_template is None:
+    try:
+        from unsloth.chat_templates import get_chat_template
+        tokenizer = get_chat_template(tokenizer, chat_template="qwen-2.5")
+        print("Restored Qwen-2.5 chat_template via Unsloth helper")
+    except Exception:
+        from transformers import AutoTokenizer
+        ref = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+        tokenizer.chat_template = ref.chat_template
+        print("Restored Qwen-2.5 chat_template from Qwen/Qwen2.5-3B-Instruct")
 
 # %%
 model = FastLanguageModel.get_peft_model(
@@ -141,7 +173,7 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 # %% [markdown]
 # ## 2. Load + format VN Alpaca slice
 #
-# `5CD-AI/Vietnamese-alpaca-cleaned` is a 50k-row VN Alpaca translation. Lab 21
+# `bkai-foundation-models/vi-alpaca` is a 50k-row VN Alpaca translation. Lab 21
 # uses 1k slice for the demo run; we match that exactly so reward gap is comparable.
 
 # %%

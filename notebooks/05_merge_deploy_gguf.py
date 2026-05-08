@@ -64,40 +64,62 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 )
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.chat_template is None:
+    try:
+        from unsloth.chat_templates import get_chat_template
+        tokenizer = get_chat_template(tokenizer, chat_template="qwen-2.5")
+    except Exception:
+        from transformers import AutoTokenizer
+        ref = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+        tokenizer.chat_template = ref.chat_template
 
-# Stack SFT-mini → DPO adapters
+# Phase 1: load SFT only — DPO applied after SFT is merged into base
 SFT_PATH = REPO_ROOT / "adapters" / "sft-mini"
 model = PeftModel.from_pretrained(model, str(SFT_PATH))
 print(f"Loaded SFT-mini adapter from {SFT_PATH}")
 
 # %% [markdown]
-# > **Note:** The DPO adapter trained in NB3 stacks on top of SFT. To get a fully
-# > aligned merged model, we apply both adapters before merging. Unsloth's
-# > `save_pretrained_merged` handles the SFT + DPO + base merge in one shot.
+# > **Note:** Unsloth `save_pretrained_merged` only supports a single PEFT layer.
+# > We merge in 2 phases: first bake SFT into base, then stack DPO on the merged
+# > base and merge again. This avoids a `NotImplementedError` from nested PeftModels.
 
 # %% [markdown]
-# ## 2. Save merged FP16 weights
-#
-# `save_pretrained_merged(method="merged_16bit")` produces a HuggingFace-format
-# directory you can either upload to HF Hub directly OR feed into the GGUF
-# converter in step 3.
+# ## 2. Save merged FP16 weights (2-phase: SFT → then DPO)
 
 # %%
-# This re-loads the model with both SFT and DPO adapters merged into base weights.
-# Output is FP16 (or BF16 on Ampere+) HF-format weights ready for inference.
-model.save_pretrained_merged(
-    str(MERGED_PATH),
-    tokenizer,
-    save_method="merged_16bit",
+# 2-phase merge: SFT first, then DPO on top of merged base.
+import gc, shutil
+
+TEMP_SFT = REPO_ROOT / "adapters" / "merged-sft-temp"
+TEMP_SFT.mkdir(parents=True, exist_ok=True)
+
+# --- Phase 1: merge SFT into base ---
+model.save_pretrained_merged(str(TEMP_SFT), tokenizer, save_method="merged_16bit")
+print(f"Phase 1 done: base+SFT merged to {TEMP_SFT}")
+del model; gc.collect(); torch.cuda.empty_cache()
+
+# --- Phase 2: reload merged SFT, stack DPO, merge final ---
+from unsloth import FastLanguageModel as _FLM
+from peft import PeftModel as _PM
+
+model, tokenizer = _FLM.from_pretrained(
+    model_name=str(TEMP_SFT),
+    max_seq_length=MAX_LEN,
+    dtype=None,
+    load_in_4bit=True,
 )
-print(f"Saved merged FP16 to {MERGED_PATH}")
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
-# Free GPU memory before GGUF conversion (which spawns a subprocess that needs RAM)
-import gc
+model = _PM.from_pretrained(model, str(DPO_PATH))
+print(f"Loaded DPO adapter from {DPO_PATH}")
 
-del model
-gc.collect()
-torch.cuda.empty_cache()
+model.save_pretrained_merged(str(MERGED_PATH), tokenizer, save_method="merged_16bit")
+print(f"Phase 2 done: base+SFT+DPO merged to {MERGED_PATH}")
+del model; gc.collect(); torch.cuda.empty_cache()
+
+shutil.rmtree(str(TEMP_SFT), ignore_errors=True)
+print(f"Saved merged FP16 (SFT+DPO) to {MERGED_PATH}")
 
 # %% [markdown]
 # ## 3. Quantize to GGUF Q4_K_M
@@ -299,7 +321,7 @@ language:
   - en
 datasets:
   - argilla/ultrafeedback-binarized-preferences-cleaned
-  - 5CD-AI/Vietnamese-alpaca-cleaned
+  - bkai-foundation-models/vi-alpaca
 tags:
   - dpo
   - alignment

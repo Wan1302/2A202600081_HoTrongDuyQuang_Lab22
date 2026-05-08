@@ -79,6 +79,14 @@ def generate_with_adapter(adapter_path: Path, prompts: list[dict], max_new_token
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.chat_template is None:
+        try:
+            from unsloth.chat_templates import get_chat_template
+            tokenizer = get_chat_template(tokenizer, chat_template="qwen-2.5")
+        except Exception:
+            from transformers import AutoTokenizer
+            ref = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+            tokenizer.chat_template = ref.chat_template
 
     model = PeftModel.from_pretrained(model, str(adapter_path))
     FastLanguageModel.for_inference(model)
