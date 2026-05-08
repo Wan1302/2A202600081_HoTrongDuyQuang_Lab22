@@ -281,16 +281,24 @@ def judge_with_anthropic(rows):
 
 
 # %%
-judge_results = None
+# Run BOTH judges if both keys present (rigor add-on +4: cross-judge comparison).
+# Otherwise fall back to whichever single key is available, then manual rubric.
+results_openai = judge_with_openai(rows) if os.environ.get("OPENAI_API_KEY") else None
+results_anthropic = judge_with_anthropic(rows) if os.environ.get("ANTHROPIC_API_KEY") else None
 
-if os.environ.get("OPENAI_API_KEY"):
-    print("Found OPENAI_API_KEY — running gpt-4o-mini judge")
-    judge_results = judge_with_openai(rows)
-elif os.environ.get("ANTHROPIC_API_KEY"):
-    print("Found ANTHROPIC_API_KEY — running claude-haiku judge")
-    judge_results = judge_with_anthropic(rows)
+if results_openai:
+    print(f"✓ gpt-4o-mini judge ran on {len(results_openai)} prompts")
+if results_anthropic:
+    print(f"✓ claude-haiku-4-5 judge ran on {len(results_anthropic)} prompts")
 
-if judge_results is None:
+# Pick the canonical "judge_results" (used by verify.py)
+if results_openai:
+    judge_results = results_openai
+    primary_judge = "gpt-4o-mini"
+elif results_anthropic:
+    judge_results = results_anthropic
+    primary_judge = "claude-haiku-4-5"
+else:
     print("No API keys set. Falling back to manual rubric mode.")
     print("Fill in your manual judgments below — same JSON shape:")
     print('  {"id": 1, "winner": "A" | "B" | "tie", "justification": "<...>"}')
@@ -298,10 +306,101 @@ if judge_results is None:
         {"id": p["id"], "category": p["category"], "winner": "tie", "justification": "MANUAL — fill in"}
         for p in EVAL_PROMPTS
     ]
+    primary_judge = "manual"
+
+print(f"\nPrimary judge for win/loss summary: {primary_judge}")
 
 (EVAL_OUT / "judge_results.json").write_text(
     json.dumps(judge_results, ensure_ascii=False, indent=2)
 )
+
+# %% [markdown]
+# ### 5a. Cross-judge comparison (rigor add-on +4)
+#
+# If both `OPENAI_API_KEY` AND `ANTHROPIC_API_KEY` are set, this cell:
+# - Computes disagreement rate between gpt-4o-mini and claude-haiku-4-5
+# - Renders a 2×2 confusion-style matrix per category (helpfulness vs safety)
+# - Saves `judge_cross.json` for REFLECTION
+
+# %%
+if results_openai and results_anthropic:
+    print("\n" + "=" * 60)
+    print("CROSS-JUDGE COMPARISON  (gpt-4o-mini × claude-haiku)")
+    print("=" * 60)
+
+    # Build merged record
+    cross = []
+    for r_oa, r_an in zip(results_openai, results_anthropic):
+        cross.append({
+            "id": r_oa["id"],
+            "category": r_oa["category"],
+            "openai_winner": r_oa.get("winner"),
+            "anthropic_winner": r_an.get("winner"),
+            "agree": r_oa.get("winner") == r_an.get("winner"),
+            "openai_justification": r_oa.get("justification", ""),
+            "anthropic_justification": r_an.get("justification", ""),
+        })
+
+    n_total = len(cross)
+    n_agree = sum(1 for c in cross if c["agree"])
+    disagreement_rate = 1 - (n_agree / n_total) if n_total else 0.0
+    print(f"Agreement: {n_agree}/{n_total}  ·  Disagreement rate: {disagreement_rate:.2%}")
+
+    # Per-category breakdown
+    for cat in ("helpfulness", "safety"):
+        subset = [c for c in cross if c["category"] == cat]
+        sub_agree = sum(1 for c in subset if c["agree"])
+        print(f"  {cat:12s}  agree {sub_agree}/{len(subset)}")
+
+    # Per-prompt details
+    print("\nPer-prompt disagreements:")
+    for c in cross:
+        if not c["agree"]:
+            print(f"  #{c['id']} ({c['category']}): OpenAI={c['openai_winner']}  vs  Anthropic={c['anthropic_winner']}")
+
+    # Save
+    (EVAL_OUT / "judge_cross.json").write_text(
+        json.dumps({
+            "n_total": n_total,
+            "n_agree": n_agree,
+            "disagreement_rate": disagreement_rate,
+            "per_prompt": cross,
+        }, ensure_ascii=False, indent=2)
+    )
+    print(f"\nSaved {EVAL_OUT / 'judge_cross.json'}")
+
+    # Plot disagreement matrix as a screenshot
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    labels = ["A (SFT)", "B (DPO)", "tie"]
+    n = len(labels)
+    matrix = np.zeros((n, n), dtype=int)
+    label_to_idx = {l[0]: i for i, l in enumerate(labels)}  # 'A','B','t'
+    for c in cross:
+        oa_key = (c["openai_winner"] or "tie")[0]
+        an_key = (c["anthropic_winner"] or "tie")[0]
+        if oa_key in label_to_idx and an_key in label_to_idx:
+            matrix[label_to_idx[oa_key], label_to_idx[an_key]] += 1
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(matrix, cmap="Blues")
+    ax.set_xticks(range(n)); ax.set_xticklabels(labels)
+    ax.set_yticks(range(n)); ax.set_yticklabels(labels)
+    ax.set_xlabel("Anthropic claude-haiku")
+    ax.set_ylabel("OpenAI gpt-4o-mini")
+    ax.set_title(f"Cross-judge agreement matrix\n({n_agree}/{n_total} agree · {disagreement_rate:.0%} disagreement)")
+    for i in range(n):
+        for j in range(n):
+            ax.text(j, i, str(matrix[i, j]), ha="center", va="center",
+                    color="white" if matrix[i, j] > matrix.max() / 2 else "black",
+                    fontsize=12, fontweight="bold")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(screenshot_dir / "08-cross-judge-matrix.png", dpi=120, bbox_inches="tight")
+    plt.show()
+else:
+    print("\nCross-judge bonus skipped — set BOTH OPENAI_API_KEY and ANTHROPIC_API_KEY for +4 pts.")
 
 # %% [markdown]
 # ## 6. Win/loss/tie summary

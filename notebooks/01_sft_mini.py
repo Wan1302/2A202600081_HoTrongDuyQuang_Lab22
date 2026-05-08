@@ -64,6 +64,41 @@ gpu = torch.cuda.get_device_properties(0)
 print(f"GPU: {gpu.name}  ({gpu.total_memory / 1e9:.1f} GB)")
 
 # %% [markdown]
+# ### 0a. Optional bonus: W&B login (rigor add-on +2)
+#
+# Set `WANDB_API_KEY` in env (or Colab Secrets) to log this run publicly.
+# If unset, training falls back to `report_to="none"` — no points lost.
+
+# %%
+USE_WANDB = bool(os.environ.get("WANDB_API_KEY"))
+WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "lab22-dpo")
+
+if USE_WANDB:
+    try:
+        import wandb
+        wandb.login(key=os.environ["WANDB_API_KEY"])
+        wandb.init(
+            project=WANDB_PROJECT,
+            name=f"sft-mini-{COMPUTE_TIER}",
+            job_type="sft",
+            config={
+                "tier": COMPUTE_TIER,
+                "base_model": BASE_MODEL,
+                "sft_slice": SFT_SLICE,
+                "epochs": NUM_EPOCHS,
+                "lora_r": 16,
+                "lora_alpha": 32,
+            },
+            reinit=True,
+        )
+        print(f"W&B run initialized: {wandb.run.url if wandb.run else 'n/a'}")
+    except Exception as exc:
+        print(f"W&B init failed ({exc}) — falling back to report_to=none")
+        USE_WANDB = False
+else:
+    print("WANDB_API_KEY not set — skipping W&B (no points lost).")
+
+# %% [markdown]
 # ## 1. Load base model with Unsloth
 #
 # Unsloth bundles patched 4-bit kernels — that's how Qwen2.5-3B (or 7B) stays
@@ -156,7 +191,8 @@ sft_config = SFTConfig(
     seed=42,
     max_seq_length=MAX_LEN,
     dataset_text_field="text",
-    report_to="none",
+    report_to="wandb" if USE_WANDB else "none",
+    run_name=f"sft-mini-{COMPUTE_TIER}" if USE_WANDB else None,
 )
 
 trainer = SFTTrainer(
@@ -198,6 +234,15 @@ plt.show()
 trainer.model.save_pretrained(str(ADAPTER_OUT))
 tokenizer.save_pretrained(str(ADAPTER_OUT))
 print(f"Saved SFT adapter to {ADAPTER_OUT}")
+
+if USE_WANDB:
+    try:
+        import wandb
+        if wandb.run is not None:
+            wandb.log({"final_train_loss": float(train_result.training_loss)})
+            wandb.finish()
+    except Exception as exc:
+        print(f"W&B finish skipped: {exc}")
 
 # %%
 # Sanity: generate 1 sample to confirm the adapter loaded correctly.

@@ -67,6 +67,35 @@ import torch
 assert torch.cuda.is_available(), "DPO needs a CUDA GPU. See HARDWARE-GUIDE.md."
 
 # %% [markdown]
+# ### 0a. Optional bonus: W&B login (rigor add-on +2)
+
+# %%
+USE_WANDB = bool(os.environ.get("WANDB_API_KEY"))
+WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "lab22-dpo")
+
+if USE_WANDB:
+    try:
+        import wandb
+        wandb.login(key=os.environ["WANDB_API_KEY"])
+        wandb.init(
+            project=WANDB_PROJECT,
+            name=f"dpo-b{BETA}-{COMPUTE_TIER}",
+            job_type="dpo",
+            config={
+                "tier": COMPUTE_TIER, "base_model": BASE_MODEL,
+                "beta": BETA, "lr": LR, "epochs": EPOCHS,
+                "max_length": MAX_LEN, "lora_r": 16, "lora_alpha": 32,
+            },
+            reinit=True,
+        )
+        print(f"W&B run initialized: {wandb.run.url if wandb.run else 'n/a'}")
+    except Exception as exc:
+        print(f"W&B init failed ({exc}) — falling back to report_to=none")
+        USE_WANDB = False
+else:
+    print("WANDB_API_KEY not set — skipping W&B (no points lost).")
+
+# %% [markdown]
 # ## 1. Load policy + reference (the VRAM-doubling part)
 #
 # **Critical:** DPO needs the policy (trainable) AND a frozen reference (no grad).
@@ -141,7 +170,8 @@ dpo_config = DPOConfig(
     fp16=not torch.cuda.is_bf16_supported(),
     seed=42,
     loss_type="sigmoid",         # DPO standard (alternatives: ipo, hinge, kto)
-    report_to="none",
+    report_to="wandb" if USE_WANDB else "none",
+    run_name=f"dpo-b{BETA}-{COMPUTE_TIER}" if USE_WANDB else None,
 )
 
 print(f"DPOConfig: beta={dpo_config.beta}  lr={dpo_config.learning_rate}  loss_type={dpo_config.loss_type}")
@@ -286,6 +316,120 @@ metrics = {
 }
 (DPO_OUT / "dpo_metrics.json").write_text(json.dumps(metrics, indent=2))
 print(f"Wrote metrics to {DPO_OUT / 'dpo_metrics.json'}")
+
+if USE_WANDB:
+    try:
+        import wandb
+        if wandb.run is not None:
+            wandb.log({k: v for k, v in metrics.items() if isinstance(v, (int, float))})
+            wandb.finish()
+    except Exception as exc:
+        print(f"W&B finish skipped: {exc}")
+
+# %% [markdown]
+# ## 6a. Optional bonus: push DPO adapter to HF Hub (Submission Option B = +5)
+#
+# Set `HF_TOKEN` and `HF_REPO` env vars (or Colab Secrets). If unset, this cell
+# is a no-op — no points lost. The pushed repo gets a model card with: base
+# model, dataset, hyperparameters, and reward gap.
+
+# %%
+HF_TOKEN = os.environ.get("HF_TOKEN")
+HF_REPO_ADAPTER = os.environ.get("HF_REPO_ADAPTER", os.environ.get("HF_REPO"))
+
+if HF_TOKEN and HF_REPO_ADAPTER and BETA == 0.1:
+    try:
+        from huggingface_hub import HfApi, login
+
+        login(token=HF_TOKEN, add_to_git_credential=False)
+        api = HfApi()
+
+        model_card = f"""---
+base_model: {BASE_MODEL}
+library_name: peft
+license: apache-2.0
+datasets:
+  - argilla/ultrafeedback-binarized-preferences-cleaned
+language:
+  - vi
+  - en
+tags:
+  - dpo
+  - alignment
+  - lora
+  - qwen2.5
+  - vinuni-lab22
+---
+
+# Lab 22 DPO Adapter — {HF_REPO_ADAPTER.split('/')[-1]}
+
+DPO LoRA adapter trained on top of an SFT-mini Qwen2.5 base for the VinUni AICB
+Day 22 alignment lab. Stack: Unsloth + TRL `DPOTrainer`.
+
+## Training details
+
+| Field | Value |
+|---|---|
+| Base model | `{BASE_MODEL}` |
+| Compute tier | {COMPUTE_TIER} |
+| SFT predecessor | 1k VN Alpaca (`5CD-AI/Vietnamese-alpaca-cleaned`) |
+| Preference dataset | `argilla/ultrafeedback-binarized-preferences-cleaned` (2k slice) |
+| DPO β | {BETA} |
+| DPO learning rate | {LR} |
+| Epochs | {EPOCHS} |
+| LoRA r / alpha | 16 / 32 |
+| Max sequence length | {MAX_LEN} |
+
+## Results
+
+| Metric | Value |
+|---|---|
+| Final training loss | {metrics['final_train_loss']:.4f} |
+| End chosen reward | {metrics['end_chosen_reward']:+.3f} |
+| End rejected reward | {metrics['end_rejected_reward']:+.3f} |
+| End reward gap | {metrics['end_reward_gap']:+.3f} |
+
+## Usage
+
+```python
+from peft import PeftModel
+from unsloth import FastLanguageModel
+
+model, tok = FastLanguageModel.from_pretrained(
+    "{BASE_MODEL}", load_in_4bit=True, max_seq_length={MAX_LEN}
+)
+model = PeftModel.from_pretrained(model, "{HF_REPO_ADAPTER}")
+```
+
+## License & limitations
+
+- Base license: Apache-2.0 (Qwen2.5).
+- This is an experimental research adapter. Not production-ready.
+- Trained on English UltraFeedback; safety alignment tested on 8 VN prompts (see
+  lab repo NB4). Use with care for deployment-critical workloads.
+
+## Citation
+
+VinUni AICB program · Track 3 Day 22 · A20 cohort 2026.
+"""
+        (DPO_OUT / "README.md").write_text(model_card, encoding="utf-8")
+
+        api.create_repo(HF_REPO_ADAPTER, exist_ok=True, private=False)
+        api.upload_folder(
+            folder_path=str(DPO_OUT),
+            repo_id=HF_REPO_ADAPTER,
+            commit_message=f"Lab 22 DPO adapter (β={BETA}, gap={metrics['end_reward_gap']:+.3f})",
+        )
+        print(f"✓ Pushed adapter + model card to https://huggingface.co/{HF_REPO_ADAPTER}")
+    except Exception as exc:
+        print(f"HF push failed: {exc}  (no points lost — re-run later or push via CLI)")
+else:
+    if not HF_TOKEN:
+        print("HF_TOKEN not set — skipping HF push (Option B bonus +5).")
+    elif not HF_REPO_ADAPTER:
+        print("HF_REPO / HF_REPO_ADAPTER not set — skipping HF push.")
+    else:
+        print(f"Skipping HF push for β={BETA} (only push the canonical β=0.1 run).")
 
 # %% [markdown]
 # ## 7. Vibe-coding callout

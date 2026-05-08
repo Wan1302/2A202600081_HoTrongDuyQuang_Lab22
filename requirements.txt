@@ -36,5 +36,9 @@ jupytext>=1.16,<2.0
 openai>=1.55,<2.0                       # gpt-4o-mini judge
 anthropic>=0.40,<1.0                    # claude-haiku judge
 
+# ── Bonus rigor add-ons (Submission Option B + W&B + HF Hub) ──
+huggingface_hub>=0.26,<1.0              # push adapter / GGUF (Option B = +5)
+wandb>=0.18,<1.0                        # public training run link (+2)
+
 # ── Test ──────────────────────────────────────────────────────
 pytest>=8.3,<9.0
